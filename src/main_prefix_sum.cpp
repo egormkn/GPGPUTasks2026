@@ -67,22 +67,12 @@ void run(int argc, char** argv)
                   << n / 1e6 / elapsed << " uint millions/s)" << std::endl;
     }
 
-    const unsigned min_precomputed_pow2 = 5; // 2^5 = 32
+    const unsigned min_precomputed_pow2 = 5; // Precompute partial sums starting from 2^5 = 32 elements
 
     size_t buffer_size = 0;
-#if RASSERT_ENABLED
-    std::vector<unsigned int> buffer_level_sizes;
-    std::vector<unsigned int> buffer_level_coverages;
-#endif
     for (unsigned pow2 = min_precomputed_pow2; (n >> pow2) > 0; ++pow2) {
-        unsigned num_values_on_level = n >> pow2;
-        buffer_size += num_values_on_level;
-#if RASSERT_ENABLED
-        buffer_level_sizes.push_back(num_values_on_level);
-        buffer_level_coverages.push_back((1 << pow2) * num_values_on_level);
-        std::cout << (1 << pow2) << " * " << num_values_on_level << " = " << (1 << pow2) * num_values_on_level << std::endl;
-#endif
-}
+        buffer_size += n >> pow2;
+    }
 
     // Аллоцируем буферы в VRAM
     gpu::gpu_mem_32u input_gpu(n), buffer_pow2_sum_gpu(buffer_size), prefix_sum_accum_gpu(n);
@@ -92,6 +82,10 @@ void run(int argc, char** argv)
 
     // Запускаем кернел (несколько раз и с замером времени выполнения)
     std::vector<double> times;
+
+    std::vector<double> times_1;
+    std::vector<double> times_2;
+    std::vector<double> times_3;
     for (int iter = 0; iter < 10; ++iter) {
         timer t;
 
@@ -100,42 +94,21 @@ void run(int argc, char** argv)
         if (context.type() == gpu::Context::TypeOpenCL) {
             ocl_sum_initialization.exec({GROUP_SIZE, n}, input_gpu, buffer_pow2_sum_gpu, min_precomputed_pow2, n);
 
-#if RASSERT_ENABLED
-            {
-                std::vector<unsigned int> test = buffer_pow2_sum_gpu.readVector();
-                test.resize(buffer_level_sizes[0]);
-                std::cout << stats::sum(test) << " == " << stats::sum(as) << std::endl;
-            }
-#endif
-
+            times_1.push_back(t.elapsed());
             for (unsigned pow2 = min_precomputed_pow2, offset = 0; (n >> (pow2 + 1)) > 0; ++pow2) {
                 unsigned num_input_values = n >> pow2;
                 unsigned num_output_values = n >> (pow2 + 1);
 
-#if RASSERT_ENABLED
-                std::cout
-                    << "Building " << num_output_values << " output sums of " << (1 << (pow2 + 1)) << " elements"
-                    << " from " << num_input_values << " input sums of " << (1 << pow2) << " elements" << std::endl;
-#endif
                 unsigned input_begin = offset;
                 unsigned output_begin = input_begin + num_input_values;
                 ocl_sum_reduction.exec({GROUP_SIZE, num_input_values}, buffer_pow2_sum_gpu, input_begin, output_begin);
 
-#if RASSERT_ENABLED
-                {
-                    std::vector<unsigned int> test = buffer_pow2_sum_gpu.readVector();
-                    test = std::vector<unsigned int>(test.begin() + output_begin, test.begin() + output_begin + num_output_values);
-                    std::vector<unsigned int> as_copy = as;
-                    as_copy.resize(buffer_level_coverages[pow2 - min_precomputed_pow2 + 1]);
-                    std::cout << stats::sum(test) << " == " << stats::sum(as_copy) << std::endl;
-                    rassert(stats::sum(test) == stats::sum(as_copy), 5462345234523, stats::sum(test), stats::sum(as_copy));
-                }
-#endif
-
                 offset += num_input_values;
             }
+            times_2.push_back(t.elapsed() - times_1.back());
 
             ocl_prefix_accumulation.exec({GROUP_SIZE, n}, input_gpu, buffer_pow2_sum_gpu, prefix_sum_accum_gpu, min_precomputed_pow2, n);
+            times_3.push_back(t.elapsed() - times_1.back() - times_2.back());
         } else if (context.type() == gpu::Context::TypeCUDA) {
             // TODO
             throw std::runtime_error(CODE_IS_NOT_IMPLEMENTED);
@@ -155,6 +128,12 @@ void run(int argc, char** argv)
         times.push_back(t.elapsed());
     }
     std::cout << "prefix sum times (in seconds) - " << stats::valuesStatsLine(times) << std::endl;
+
+
+    std::cout << "times_1 (in seconds) - " << stats::valuesStatsLine(times_1) << std::endl;
+    std::cout << "times_2 (in seconds) - " << stats::valuesStatsLine(times_2) << std::endl;
+    std::cout << "times_3 (in seconds) - " << stats::valuesStatsLine(times_3) << std::endl;
+
 
     // Вычисляем достигнутую эффективную пропускную способность видеопамяти (из соображений что мы отработали в один проход - считали массив и сохранили префиксные суммы)
     double memory_size_gb = sizeof(unsigned int) * 2 * n / 1024.0 / 1024.0 / 1024.0;

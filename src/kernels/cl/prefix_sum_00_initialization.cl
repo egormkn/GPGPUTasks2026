@@ -8,7 +8,7 @@
 __attribute__((reqd_work_group_size(GROUP_SIZE, 1, 1)))
 __kernel void prefix_sum_00_initialization(
     __global const unsigned int* input, // contains n values
-    __global       unsigned int* buffer_pow2_sum, // will contain n / (1 << pow2) values
+    __global       unsigned int* partial_sums, // contains partial sums of 2^k elements for k in [min_precomputed_pow2, floor(log2(n))]
     unsigned int min_precomputed_pow2,
     unsigned int n)
 {
@@ -31,6 +31,6 @@ __kernel void prefix_sum_00_initialization(
             sum += local_input[local_index * window_size + i];
         }
         const unsigned int output_index = get_group_id(0) * num_workers + local_index;
-        buffer_pow2_sum[output_index] = sum;
+        partial_sums[output_index] = sum;
     }
 }
